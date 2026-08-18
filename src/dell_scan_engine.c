@@ -423,10 +423,17 @@ int main(int argc, char **argv) {
       /*
        * Deliberate double poll between sides, carried over from the original
        * recovery session; the result is intentionally discarded both times.
-       * Why two calls are needed has not been established from Dell's driver,
-       * so do not collapse this to one call or drop it without re-verifying a
-       * multi-sheet ADF batch on real hardware -- feeding is what regresses,
-       * and it regresses silently on sheet two.
+       *
+       * Disassembling the driver shows why a second call can differ from the
+       * first. GetADFMode is not a straight query: it passes a sticky error
+       * field, a five-case state switch, and a byte flag before it reaches
+       * CScanner::GetDeviceStatus, and only one switch branch leads there. A
+       * call that fails any gate returns without touching the scanner. What is
+       * NOT established is that the first call reliably misses and the second
+       * reliably lands -- that needs a traced live scan. So do not collapse
+       * this to one call or drop it without re-verifying a multi-sheet ADF
+       * batch on real hardware: feeding is what regresses, and it regresses
+       * silently on sheet two. research/PROTOCOL.md carries the detail.
        */
       adf[0] = 0;
       adf[1] = 0;

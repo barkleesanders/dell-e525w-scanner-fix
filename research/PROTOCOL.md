@@ -125,10 +125,30 @@ lidless scanner and remains open.
 
 Among the mangled C++ symbols, three are worth naming because they bear on open questions here:
 
-- `CScanner::GetDeviceStatus(_DevStatus&, _ADFStatus&)` returns device and ADF state together in
-  one call. The engine currently polls `GetADFMode` twice between sides for reasons never
-  established from Dell's driver (see the comment in `src/dell_scan_engine.c`). Whether this is
-  the API that poll is standing in for is untested, and testing it needs the hardware.
+- `CScanner::GetDeviceStatus(_DevStatus&, _ADFStatus&)` is **not** an alternative to `GetADFMode`,
+  and an earlier revision here was wrong to float it as one. `GetADFMode` *calls* it: the
+  disassembly branches to `bl __ZN8CScanner15GetDeviceStatusER10_DevStatusR10_ADFStatus`.
+  Calling `GetDeviceStatus` directly would skip the ADF interpretation layered on top and gain
+  nothing. That lead is closed.
+
+  The same disassembly explains the double poll at mechanism level. `GetADFMode` is not a
+  straight query -- it passes three gates before it ever reaches the device:
+
+  1. a sticky error field at `this+0x77c`; non-zero returns failure immediately, no hardware
+     access. Fourteen sites write it and four clear it to zero, and those clears sit within a few
+     bytes of writes to the state field below, so lifecycle calls reset both together.
+  2. a five-case switch on a state field at `this+0x114`, dispatched through a jump table. Only
+     one branch leads to the device.
+  3. a byte flag at `this+0x110` guarding that branch.
+
+  So two consecutive calls can legitimately return different answers, because the first may not
+  query the scanner at all. That makes the double poll defensible rather than superstitious, and
+  it is why collapsing it to one call is unsafe. What remains unproven is the specific claim that
+  the *first* call reliably misses and the *second* reliably reaches the device; establishing
+  that needs a traced live scan, not more static reading. Public documentation cannot settle it
+  either -- a provider sweep found no third-party description of this driver's internals, while
+  the same sweep returned the `sane-airscan` source and manpages on the first query, so the
+  absence is real rather than a search failure.
 - `CScanner::SetSecondGamma` and the whole `CDownloadGammaReq` class expose gamma-table download,
   i.e. scanner-side tone control this project does not use.
 - `CScanner::GetScanVersion(unsigned short&)` reports a firmware or protocol version this project
