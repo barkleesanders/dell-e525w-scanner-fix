@@ -116,6 +116,22 @@ static bool write_pgm(const char *prefix, uint32_t page_number, const uint8_t *p
   }
 
   size_t row_offset = dell_e525w_front_row_offset(page_number, visible_width);
+  /*
+   * tail_length below is size_t, so an offset at or past the row width would
+   * wrap to a huge length and read far outside the page buffer. That cannot
+   * happen today -- dell_row_wrap.h returns 0 unless width is exactly 2550 and
+   * its largest offset is 2048 -- but the bound lives in a different file from
+   * this subtraction, so check it here rather than depend on that coupling.
+   * Failing loudly beats clamping: a silent clamp would emit a wrong image.
+   * dell_image_quality.h already takes the same input modulo the width.
+   */
+  if (row_offset >= visible_width) {
+    fprintf(stderr, "row wrap offset %zu is not valid for a %u-pixel row\n", row_offset,
+            visible_width);
+    fclose(output);
+    unlink(path);
+    return false;
+  }
   bool ok = fprintf(output, "P5\n%u %u\n255\n", visible_width, visible_height) > 0;
   for (uint16_t row = 0; ok && row < visible_height; ++row) {
     const uint8_t *row_start = page + (size_t)row * row_bytes;
@@ -363,6 +379,14 @@ int main(int argc, char **argv) {
     printf("page_complete=%" PRIu32 "\n", page_number);
 
     if (page_number < max_pages) {
+      /*
+       * Deliberate double poll between sides, carried over from the original
+       * recovery session; the result is intentionally discarded both times.
+       * Why two calls are needed has not been established from Dell's driver,
+       * so do not collapse this to one call or drop it without re-verifying a
+       * multi-sheet ADF batch on real hardware -- feeding is what regresses,
+       * and it regresses silently on sheet two.
+       */
       adf[0] = 0;
       adf[1] = 0;
       (void)api.get_adf_mode(adf);
