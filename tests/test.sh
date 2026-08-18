@@ -61,6 +61,21 @@ printf '%s\n' '"locationID" = 123'
 EOF
 chmod +x "$mock_bin/ioreg"
 
+# NOTE ON COVERAGE: this OVERWRITES the compiled dell-scan-engine with a shell
+# mock, because the real engine dlopens Dell's proprietary SWLLD.dylib and needs
+# a physical printer with paper in the ADF -- neither exists in CI. Everything
+# below therefore tests bin/dell-scan's orchestration, NOT the C engine.
+#
+# So the engine's write_pgm -- including the row-wrap correction that is the
+# whole point of 1.1.0 -- has NO runtime coverage here, and scripts/check.sh
+# only compiles it. What is covered instead:
+#   - tests/row_wrap_test.c pins the offset contract write_pgm depends on
+#     (including offset < width, the invariant whose violation would make
+#     write_pgm read outside the page buffer)
+#   - tests/image_quality_test.c covers the streak detector directly
+#   - the bridge section below runs the real dell-wifi-bridge binary
+# Do not read a green suite as "the engine works"; that still requires a real
+# scan on hardware.
 engine="$test_root/prefix/libexec/dell-e525w-scanner-fix/dell-scan-engine"
 cat >"$engine" <<'EOF'
 #!/bin/bash
