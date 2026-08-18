@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-readonly dell_scan_version='1.1.0'
+readonly dell_scan_version='1.1.1'
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly script_dir
 readonly default_driver='/Library/Image Capture/Devices/Dell E525w Scanner (ICA).app/Contents/Resources/SWLLD.dylib'
@@ -288,11 +288,11 @@ page_files=("$page_prefix"-page-*.pgm)
 shopt -u nullglob
 (( ${#page_files[@]} > 0 )) || fail 'scanner returned no pages'
 
-pdf_arguments=()
-if (( ! keep_blank_backs )); then
-  pdf_arguments+=(--drop-blank-backs)
+if (( keep_blank_backs )); then
+  "$pdf_binary" "$output_pdf" "${page_files[@]}"
+else
+  "$pdf_binary" --drop-blank-backs "$output_pdf" "${page_files[@]}"
 fi
-"$pdf_binary" "${pdf_arguments[@]}" "$output_pdf" "${page_files[@]}"
 [[ -s "$output_pdf" ]] || fail 'PDF conversion produced an empty file'
 
 if (( keep_pgm )); then
