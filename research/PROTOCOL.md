@@ -15,7 +15,9 @@ decompiled Dell code.
 - Bytes transferred per page: 8,519,680
 - Observed front-side row correction cycle: 0, 2048, 512, 1536 pixels, repeating
 - Native network service: TCP 23010
-- Broken compatibility path: eSCL `POST /eSCL/ScanJobs` returned HTTP 503
+- Broken compatibility path: eSCL unusable. `POST /eSCL/ScanJobs` returned HTTP 503 during the
+  original failure; a later re-measurement found no eSCL service advertised or served at all
+  (see "Independent re-verification" below)
 - Working paths: Dell native USB; Dell native Wi-Fi after restarting its stuck printer service
 
 The proof PDFs and source pages contained private information and are intentionally not distributed.
@@ -84,6 +86,43 @@ ICMP, and SNMP still worked, but 23010 timed out. A restart-only standard Printe
 the listener, after which a full ADF page scanned successfully over Wi-Fi. Do not use the network
 transport probe casually: this legacy service appears single-session and a connection-only probe can
 consume or wedge it until the printer restarts.
+
+## Independent re-verification
+
+A later pass re-measured the same printer and Mac from scratch against live sources rather than
+against these notes. It confirmed the core claims and sharpened one of them. No device
+identifiers, addresses, or scanned content are recorded here.
+
+**The compatibility path is absent, not merely erroring.** A Bonjour browse for `_uscan._tcp` and
+`_uscans._tcp` returned no scan service. `/eSCL/ScannerStatus` and `/eSCL/ScannerCapabilities`
+returned HTTP 404 over both HTTP and HTTPS, including lowercase and mixed-case path variants,
+while the printer's own web server answered normally in the same window. The 404 is therefore a
+real routing answer, not an unreachable host. TCP 23010 was open at the same time. This is a
+stronger statement than the original HTTP 503: in this state the device offers no eSCL scan
+service for a generic AirScan client to use at all, which is why a compatibility-layer fix cannot
+exist and the native path is the only option.
+
+**The driver is modern, and that matters.** `SWLLD.dylib` and the ICA executable are both
+universal `x86_64 arm64` Mach-O binaries dated June 2021, so they run natively on Apple silicon.
+The common assumption that Dell scanning broke because the driver is a 32-bit relic does not hold
+for the A05 package. The library is healthy; the consumer-facing layers stacked on top of it are
+what fail. That is precisely why calling the library directly works.
+
+**Dell's scanner app cannot be automated.** The installed `Dell E525w Scanner (ICA).app` declares
+`LSUIElement = 1`, bundle identifier `dltsp4zICA`, version 1.0.2.6, and ships a single Mach-O with
+no command-line entry point. It is an Image Capture plugin that only runs when a user drives
+Apple's GUI. Batch, headless, and scheduled scanning are not features it withholds; they are
+outside what its interface can express.
+
+**The exported symbols exist.** `nm -gU` on the installed `SWLLD.dylib` lists
+`_FindScannerByLocation`, `_FindScannerByLocation_pull`, `_FindScannerEx`,
+`_FindScannerEx_Scopeid`, `_InitializeScanner`, `_SetScanParameter`, `_StartScan`, and `_ReadScan`
+as global text symbols, alongside a C++ `CScanner` class.
+
+**Dell's published package.** The linked official driver page lists the file as
+`Dell A05_Mac.dmg`, version V1.1.5.8, release date 26 July 2021, supporting macOS 10.6 to 11. Dell
+hosts more than one E525w macOS driver page with differing stated ranges, so quote the specific
+`driverid` when citing a support claim.
 
 ## Why a certificate was not the fix
 

@@ -1,7 +1,7 @@
 # Dell E525w Scanner Fix for macOS
 
-Restore ADF scanning on a Dell Color MFP E525w when Image Capture/AirScan fails,
-`POST /eSCL/ScanJobs` returns HTTP 503, or the printer's native Wi-Fi scanner service is stuck.
+Restore ADF scanning on a Dell Color MFP E525w when Image Capture/AirScan fails, the printer
+serves no working eSCL endpoint (HTTP 503 or 404), or its native Wi-Fi scanner service is stuck.
 
 This project provides a small open-source CLI that talks to Dell's locally installed scanner driver
 at its native API. It supports both direct USB and Dell's native Wi-Fi protocol and creates a US
@@ -91,8 +91,13 @@ running it if you do not want to pipe a network response directly to `bash`.
 
 The failure had six separate layers:
 
-1. The printer advertised eSCL/AirScan and reported an idle, loaded ADF, but every ScanJobs request
-   failed with HTTP 503. A certificate could not fix this because TLS was not the failing layer.
+1. The compatibility scan path does not work. During the original failure the printer advertised
+   eSCL/AirScan and reported an idle, loaded ADF, yet every ScanJobs request failed with HTTP 503.
+   Re-measured later on the same printer, eSCL was gone outright: no `_uscan._tcp` or
+   `_uscans._tcp` mDNS advertisement, and `/eSCL/*` answering HTTP 404 on every case variant while
+   the printer's own web server still responded normally. In both states there is nothing for
+   Image Capture, Preview, or any AirScan client to talk to. A certificate could not fix this
+   because TLS was not the failing layer.
 2. Dell's installed `SWLLD.dylib` still exposed a complete native scanner API. Direct USB calls to
    `FindScannerByLocation_pull`, `InitializeScanner`, `SetScanParameter`, `StartScan`, and `ReadScan`
    successfully transferred a full 300-DPI grayscale Letter page.
