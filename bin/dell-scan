@@ -190,6 +190,7 @@ done
 [[ "$page_limit" =~ ^[0-9]+$ ]] || fail 'raw-side ceiling must be an integer from 1 to 100'
 (( page_limit >= 1 && page_limit <= 100 )) || fail 'raw-side ceiling must be from 1 to 100'
 [[ "$retry_delay" =~ ^[0-9]+$ ]] || fail 'USB retry delay must be a nonnegative integer'
+(( retry_delay <= 60 )) || fail 'USB retry delay must be from 0 to 60 seconds'
 [[ "$retry_attempts" =~ ^[0-9]+$ ]] || fail 'USB retry attempts must be an integer'
 (( retry_attempts >= 1 && retry_attempts <= 120 )) ||
   fail 'USB retry attempts must be from 1 to 120'

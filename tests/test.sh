@@ -118,6 +118,34 @@ grep -F 'blank_backs_dropped=0' "$test_root/keep-blank-backs.out"
 grep -F 'Raw sides captured: 10' "$test_root/keep-blank-backs.out"
 [[ "$(<"$test_root/attempt-count")" == '4' ]]
 
+if DELL_SCAN_RETRY_DELAY=61 DELL_SCAN_DRIVER="$test_root/fake-driver.dylib" \
+  "$scanner" --usb --output "$test_root/bad-delay.pdf" >"$test_root/bad-delay.out" \
+  2>"$test_root/bad-delay.err"; then
+  echo 'out-of-range retry delay unexpectedly passed' >&2
+  exit 1
+fi
+grep -F 'USB retry delay must be from 0 to 60 seconds' "$test_root/bad-delay.err"
+
+# Structural guard for the Apple Bash 3.2 defect fixed in 1.1.1: with `set -u`,
+# "${array[@]}" is an unbound variable when the array is empty. Both `bash -n`
+# and the linter accept that form, so only this invariant catches a
+# reintroduction. Any array that starts empty and is conditionally appended must
+# be expanded behind a ${#array[@]} count guard.
+unguarded_arrays=''
+for relative_script in bin/dell-scan install.sh scripts/check.sh tests/test.sh; do
+  script_path="$repo_root/$relative_script"
+  while IFS= read -r array_name; do
+    [[ -n "$array_name" ]] || continue
+    grep -qF "\${#${array_name}[@]}" "$script_path" ||
+      unguarded_arrays="$unguarded_arrays $relative_script:$array_name"
+  done < <(grep -oE '^[[:space:]]*(declare -a )?[A-Za-z_][A-Za-z0-9_]*=\(\)' "$script_path" |
+    sed -E 's/^[[:space:]]*(declare -a )?//; s/=\(\)$//' | sort -u)
+done
+if [[ -n "$unguarded_arrays" ]]; then
+  echo "empty-initialized arrays expanded without a count guard:$unguarded_arrays" >&2
+  exit 1
+fi
+
 if command -v qpdf >/dev/null; then
   qpdf --check "$test_root/fixture.pdf" >/dev/null
   [[ "$(qpdf --show-npages "$test_root/fixture.pdf")" == '1' ]]

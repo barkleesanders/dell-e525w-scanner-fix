@@ -143,7 +143,15 @@ esac
 
 if [[ -n "$scan_mode" ]]; then
   printf 'Starting %s scan...\n' "$scan_mode"
-  DELL_SCAN_DRIVER="$driver_path" "$install_bin/dell-scan" "${scan_arguments[@]}"
+  # Apple Bash 3.2 with `set -u` treats "${array[@]}" as an unbound variable when
+  # the array is empty, so guard the expansion on a non-zero count. Every option
+  # that sets scan_mode also appends here, so the empty branch is unreachable
+  # today; the guard keeps a future option from reintroducing the 1.1.1 defect.
+  if (( ${#scan_arguments[@]} > 0 )); then
+    DELL_SCAN_DRIVER="$driver_path" "$install_bin/dell-scan" "${scan_arguments[@]}"
+  else
+    DELL_SCAN_DRIVER="$driver_path" "$install_bin/dell-scan"
+  fi
 else
   printf '%s\n' 'Next: dell-scan --wifi'
   printf '%s\n' 'USB fallback: connect the cable, then run: dell-scan --usb'
