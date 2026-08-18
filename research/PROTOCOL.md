@@ -68,6 +68,66 @@ USB discovery calls `FindScannerByLocation_pull(locationID)`. Wi-Fi discovery ca
 `FindScannerEx(true, address)`. Both then use the same initialization, parameter, start, read,
 cancel, and termination sequence.
 
+## The driver's full export surface, and what is left unused
+
+The list above is what this project calls. It is not what the driver offers. Measured with
+`nm -gU` on the installed dylib: **233 exported symbols**, of which 19 are unmangled C ABI and
+the remainder are mangled C++ (`CScanner`, `CUsbDevice`, `CNetDevice`, `CDataPool`, `CSocket`,
+and the `CScannerCmd` request/response hierarchy). The 13 above are all C ABI, so the C-ABI
+surface this project does **not** touch is exactly six names:
+
+```text
+CheckScannerReady        pre-flight readiness; would turn a mid-scan failure into a clean refusal
+FindScannerByLocation    non-pull variant of the USB discovery already in use
+FindScannerEx_Scopeid    IPv6 scoped variant of the Wi-Fi discovery already in use
+FindSnmpAgent            SNMP-based network discovery -- see the dead end below
+FindSnmpAgentCOMM        same, with an explicit community string
+g_Scanner                the global CScanner instance, not a function
+```
+
+Two of those six were chased and are dead ends, recorded here so the next person does not
+repeat the work:
+
+- **SNMP discovery is not usable on this device.** A raw SNMPv1 `sysName` GET to UDP 161 on the
+  printer under test returns ICMP port-unreachable, not a timeout -- the agent is actively
+  refused, not merely slow. The open ports are HTTP, HTTPS, IPP, and mDNS.
+- **It would be redundant anyway.** `dell-scan --wifi` already discovers the printer over mDNS
+  when `--ip` is omitted, and that path resolves `_pdl-datastream._tcp` in about three seconds
+  against the live device.
+
+`CheckScannerReady` is the one C-ABI name still worth pursuing. It is `extern "C"`, so there is
+no mangled signature to decode from, and calling it would require inferring the argument shape
+from disassembly plus a real jammed or warming scanner to exercise the failure path.
+
+Among the mangled C++ symbols, three are worth naming because they bear on open questions here:
+
+- `CScanner::GetDeviceStatus(_DevStatus&, _ADFStatus&)` returns device and ADF state together in
+  one call. The engine currently polls `GetADFMode` twice between sides for reasons never
+  established from Dell's driver (see the comment in `src/dell_scan_engine.c`). Whether this is
+  the API that poll is standing in for is untested, and testing it needs the hardware.
+- `CScanner::SetSecondGamma` and the whole `CDownloadGammaReq` class expose gamma-table download,
+  i.e. scanner-side tone control this project does not use.
+- `CScanner::GetScanVersion(unsigned short&)` reports a firmware or protocol version this project
+  never reads.
+
+### Binary facts, measured rather than quoted
+
+Dell's support page describes the driver's OS range in marketing terms. The binary is more
+precise, and more favorable:
+
+```text
+type      Mach-O universal binary, 2 architectures
+slices    x86_64 (LC_VERSION_MIN_MACOSX 10.9) and arm64 (LC_BUILD_VERSION minos 11.0)
+built     against the macOS 11.1 SDK; file mtime June 2021
+links     Carbon, IOKit, CoreFoundation, CoreServices, libc++, libSystem
+```
+
+Two consequences. First, the arm64 slice is native Apple silicon and runs without translation --
+this driver is not a 32-bit or Rosetta-only relic, which is the usual reason a printer of this
+age loses its scanner. Second, nothing it links against has been removed from macOS; Carbon is
+legacy but still ships. The driver did not rot. The consumer-facing layer above it stopped being
+maintained, which is a different failure and the reason a CLI can recover the device at all.
+
 ## Network finding
 
 Symbol and debugger analysis showed that Dell's `CNetDevice` opens TCP port 23010. The correct IPv4
