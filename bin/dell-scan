@@ -1,0 +1,257 @@
+#!/bin/bash
+
+set -euo pipefail
+
+readonly dell_scan_version='1.0.0'
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly script_dir
+readonly default_driver='/Library/Image Capture/Devices/Dell E525w Scanner (ICA).app/Contents/Resources/SWLLD.dylib'
+
+libexec_dir="${DELL_SCAN_LIBEXEC:-$script_dir/../libexec/dell-e525w-scanner-fix}"
+scanner_binary="$libexec_dir/dell-scan-engine"
+wifi_bridge_binary="$libexec_dir/dell-wifi-bridge"
+pdf_binary="$libexec_dir/pgm-to-pdf"
+dell_library="${DELL_SCAN_DRIVER:-$default_driver}"
+page_limit=1
+output_pdf=''
+keep_pgm=0
+transport='usb'
+wifi_ip="${DELL_SCAN_IP:-}"
+scan_temp_dir=''
+wifi_bridge_pid=''
+wifi_nc_pid=''
+
+usage() {
+  cat <<'EOF'
+Usage: dell-scan [--usb | --wifi [--ip ADDRESS]] [-p PAGES] [-o OUTPUT.pdf]
+                 [--driver SWLLD.dylib] [--keep-pgm]
+
+Scan US Letter pages from a Dell Color MFP E525w ADF through Dell's native
+scanner protocol. The result is a grayscale PDF. USB is the default transport.
+
+Options:
+      --usb             Use direct USB (default; connect the printer by cable)
+      --wifi            Use Dell's native Wi-Fi scanner service on TCP 23010
+      --ip ADDRESS      Printer IPv4 address; otherwise discover it with mDNS
+  -p, --pages PAGES     Maximum pages to scan (1-100; default: 1)
+  -o, --output PATH     PDF path (default: ~/Documents/Scans/<timestamp>.pdf)
+      --driver PATH     Path to Dell's installed SWLLD.dylib
+      --keep-pgm        Preserve lossless per-page PGM files beside the PDF
+      --version         Show the version
+  -h, --help            Show this help
+
+If Wi-Fi scanning is stuck, power-cycle the printer. For an immediate bypass,
+connect a USB cable directly to the Mac and run: dell-scan --usb
+EOF
+}
+
+fail() {
+  printf 'dell-scan: %s\n' "$*" >&2
+  exit 2
+}
+
+valid_ipv4() {
+  local address="$1"
+  local octet
+  local old_ifs="$IFS"
+  local -a octets
+
+  IFS='.' read -r -a octets <<<"$address"
+  IFS="$old_ifs"
+  (( ${#octets[@]} == 4 )) || return 1
+  for octet in "${octets[@]}"; do
+    [[ "$octet" =~ ^[0-9]{1,3}$ ]] || return 1
+    (( 10#$octet <= 255 )) || return 1
+  done
+}
+
+resolve_ipv4() {
+  local hostname="$1"
+  dscacheutil -q host -a name "$hostname" 2>/dev/null |
+    awk '/^ip_address:/ && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print $2; exit }'
+}
+
+discover_wifi_ip() {
+  command -v ippfind >/dev/null || return 1
+  command -v dscacheutil >/dev/null || return 1
+
+  local local_hostname=''
+  local candidate=''
+  local resolved=''
+  if command -v scutil >/dev/null; then
+    local_hostname="$(scutil --get LocalHostName 2>/dev/null || true).local"
+  fi
+
+  while IFS= read -r candidate; do
+    candidate="${candidate%.}"
+    [[ -n "$candidate" ]] || continue
+    [[ "$candidate" != 'localhost' && "$candidate" != 'localhost.local' ]] || continue
+    [[ -z "$local_hostname" || "$candidate" != "$local_hostname" ]] || continue
+    resolved="$(resolve_ipv4 "$candidate")"
+    if valid_ipv4 "$resolved"; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  done < <(ippfind -T 4 -4 _ipps._tcp \
+    --name '.*[Dd][Ee][Ll][Ll].*[Ee]525[wW].*' \
+    --exec /bin/echo '{service_hostname}' ';' 2>/dev/null || true)
+  return 1
+}
+
+cleanup() {
+  if [[ -n "$wifi_bridge_pid" ]]; then
+    kill "$wifi_bridge_pid" 2>/dev/null || true
+    wait "$wifi_bridge_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$wifi_nc_pid" ]]; then
+    kill "$wifi_nc_pid" 2>/dev/null || true
+    wait "$wifi_nc_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$scan_temp_dir" && -d "$scan_temp_dir" ]]; then
+    find "$scan_temp_dir" -type f -delete
+    find "$scan_temp_dir" -type p -delete
+    rmdir "$scan_temp_dir" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT HUP INT TERM
+
+while (( $# > 0 )); do
+  case "$1" in
+    -p|--pages)
+      (( $# >= 2 )) || fail "$1 requires a value"
+      page_limit="$2"
+      shift 2
+      ;;
+    -o|--output)
+      (( $# >= 2 )) || fail "$1 requires a value"
+      output_pdf="$2"
+      shift 2
+      ;;
+    --driver)
+      (( $# >= 2 )) || fail "$1 requires a value"
+      dell_library="$2"
+      shift 2
+      ;;
+    --keep-pgm)
+      keep_pgm=1
+      shift
+      ;;
+    --usb)
+      transport='usb'
+      shift
+      ;;
+    --wifi)
+      transport='wifi'
+      shift
+      ;;
+    --ip)
+      (( $# >= 2 )) || fail "$1 requires a value"
+      wifi_ip="$2"
+      transport='wifi'
+      shift 2
+      ;;
+    --version)
+      printf 'dell-scan %s\n' "$dell_scan_version"
+      exit 0
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "unknown option: $1"
+      ;;
+  esac
+done
+
+[[ "$page_limit" =~ ^[0-9]+$ ]] || fail 'page count must be an integer from 1 to 100'
+(( page_limit >= 1 && page_limit <= 100 )) || fail 'page count must be from 1 to 100'
+
+if [[ "$transport" == 'wifi' ]]; then
+  if [[ -z "$wifi_ip" ]]; then
+    printf 'Discovering Dell E525w on the local network...\n' >&2
+    wifi_ip="$(discover_wifi_ip)" ||
+      fail 'automatic discovery failed; retry with --wifi --ip PRINTER_IPV4'
+  fi
+  valid_ipv4 "$wifi_ip" || fail "invalid printer IPv4 address: $wifi_ip"
+fi
+
+[[ -x "$scanner_binary" ]] || fail "scanner engine is missing; reinstall the package: $scanner_binary"
+[[ -x "$pdf_binary" ]] || fail "PDF converter is missing; reinstall the package: $pdf_binary"
+[[ -r "$dell_library" ]] ||
+  fail "Dell's official E525w macOS scanner driver is not installed: $dell_library"
+
+if [[ -z "$output_pdf" ]]; then
+  output_pdf="$HOME/Documents/Scans/Dell-E525w-${transport}-$(date '+%Y%m%d-%H%M%S').pdf"
+fi
+[[ "$output_pdf" == *.pdf ]] || fail 'output path must end in .pdf'
+[[ ! -e "$output_pdf" ]] || fail "refusing to overwrite existing file: $output_pdf"
+
+if (( keep_pgm )); then
+  pgm_dir="${output_pdf%.pdf}-pages"
+  [[ ! -e "$pgm_dir" ]] || fail "refusing to overwrite existing path: $pgm_dir"
+fi
+
+output_dir="$(dirname "$output_pdf")"
+mkdir -p "$output_dir"
+
+if [[ "$transport" == 'usb' ]]; then
+  command -v ioreg >/dev/null || fail 'ioreg is unavailable'
+  scan_target="$(ioreg -p IOUSB -l -w0 -r -n 'Color MFP E525w' |
+    awk -F'= ' '/"locationID"/ { print $2; exit }')"
+  if [[ ! "$scan_target" =~ ^[0-9]+$ ]]; then
+    fail 'Dell E525w is not visible over USB; connect it directly, turn it on, and retry'
+  fi
+fi
+
+scan_temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/dell-e525w-scan.XXXXXX")"
+page_prefix="$scan_temp_dir/scan"
+
+if [[ "$transport" == 'wifi' ]]; then
+  [[ -x "$wifi_bridge_binary" ]] ||
+    fail "Wi-Fi bridge is missing; reinstall the package: $wifi_bridge_binary"
+  [[ -x /usr/bin/nc ]] || fail '/usr/bin/nc is unavailable'
+  to_printer_fifo="$scan_temp_dir/to-printer.fifo"
+  from_printer_fifo="$scan_temp_dir/from-printer.fifo"
+  mkfifo "$to_printer_fifo" "$from_printer_fifo"
+  /usr/bin/nc "$wifi_ip" 23010 <"$to_printer_fifo" >"$from_printer_fifo" &
+  wifi_nc_pid=$!
+  "$wifi_bridge_binary" "$wifi_ip" "$to_printer_fifo" "$from_printer_fifo" \
+    >"$scan_temp_dir/bridge.log" 2>&1 &
+  wifi_bridge_pid=$!
+  sleep 0.25
+  kill -0 "$wifi_nc_pid" 2>/dev/null || fail 'Wi-Fi transport could not reach the printer'
+  kill -0 "$wifi_bridge_pid" 2>/dev/null || fail 'Wi-Fi loopback bridge did not start'
+  scan_target='127.0.0.1'
+fi
+
+if ! "$scanner_binary" "$dell_library" "$transport" "$scan_target" "$page_prefix" \
+  "$page_limit"; then
+  if [[ -f "$scan_temp_dir/bridge.log" ]]; then
+    cat "$scan_temp_dir/bridge.log" >&2
+  fi
+  if [[ "$transport" == 'wifi' ]]; then
+    printf '%s\n' \
+      'Wi-Fi recovery: power-cycle the printer, or connect USB and run: dell-scan --usb' >&2
+  else
+    printf '%s\n' 'USB recovery: reseat the page and cable, then retry: dell-scan --usb' >&2
+  fi
+  fail 'scan engine failed'
+fi
+
+shopt -s nullglob
+page_files=("$page_prefix"-page-*.pgm)
+shopt -u nullglob
+(( ${#page_files[@]} > 0 )) || fail 'scanner returned no pages'
+
+"$pdf_binary" "$output_pdf" "${page_files[@]}"
+[[ -s "$output_pdf" ]] || fail 'PDF conversion produced an empty file'
+
+if (( keep_pgm )); then
+  mkdir "$pgm_dir"
+  cp "${page_files[@]}" "$pgm_dir/"
+  printf 'PGM pages: %s\n' "$pgm_dir"
+fi
+
+printf 'PDF: %s\n' "$output_pdf"
+printf 'Pages: %s\n' "${#page_files[@]}"

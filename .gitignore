@@ -1,0 +1,14 @@
+.DS_Store
+build/
+*.app
+*.dylib
+*.gpr
+*.rep/
+*.pdf
+*.pgm
+*.png
+*.tiff
+*.jpg
+*.jpeg
+*.dmg
+*.zip

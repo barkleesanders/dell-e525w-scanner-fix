@@ -1,0 +1,109 @@
+# Sanitized investigation and protocol notes
+
+These notes preserve the evidence needed to reproduce the fix without publishing scanned pages,
+device identifiers, private network details, proprietary Dell binaries, Ghidra projects, or
+decompiled Dell code.
+
+## Proven behavior
+
+- Device: Dell Color MFP E525w over USB and Wi-Fi
+- USB identity: vendor `0x413c`, product `0x5909`
+- Dell ICA functional unit: ADF unit 3
+- Scan profile: US Letter, 300 DPI, 8-bit grayscale, ADF
+- Driver geometry: 2560 by 3328 bytes/rows
+- Visible output: 2550 by 3300 pixels
+- Bytes transferred per page: 8,519,680
+- Native network service: TCP 23010
+- Broken compatibility path: eSCL `POST /eSCL/ScanJobs` returned HTTP 503
+- Working paths: Dell native USB; Dell native Wi-Fi after restarting its stuck printer service
+
+The proof PDFs and source pages contained private information and are intentionally not distributed.
+Their structure, page dimensions, and readability were validated locally before publication.
+
+## Driver interface used by the original source
+
+The public scan engine dynamically resolves these exported symbols from the user's legitimate local
+installation of `SWLLD.dylib`:
+
+```text
+FindScannerByLocation_pull
+FindScannerEx
+InitializeDriver
+InitializeScanner
+GetADFMode
+GetScannerStatus
+SetScanParameter
+GetScanParameter
+StartScan
+ReadScan
+StopScan
+CancelScan
+TerminateDriver
+```
+
+USB discovery calls `FindScannerByLocation_pull(locationID)`. Wi-Fi discovery calls
+`FindScannerEx(true, address)`. Both then use the same initialization, parameter, start, read,
+cancel, and termination sequence.
+
+## Network finding
+
+Symbol and debugger analysis showed that Dell's `CNetDevice` opens TCP port 23010. The correct IPv4
+socket address reached the connect call, but an unsigned custom helper received macOS
+`EHOSTUNREACH` while Apple's `/usr/bin/nc` could make the same connection. The production workaround
+therefore has two pieces:
+
+1. `dell-wifi-bridge` accepts one loopback connection from Dell's unmodified driver.
+2. The shell launches `/usr/bin/nc` and connects the bridge to it with two private FIFOs.
+
+This keeps the proprietary protocol unchanged. Only the process responsible for the outbound local
+network socket changes.
+
+The native scanner listener later wedged after interrupted discovery experiments. HTTP 80, IPP 631,
+ICMP, and SNMP still worked, but 23010 timed out. A restart-only standard Printer-MIB reset recovered
+the listener, after which a full ADF page scanned successfully over Wi-Fi. Do not use the network
+transport probe casually: this legacy service appears single-session and a connection-only probe can
+consume or wedge it until the printer restarts.
+
+## Why a certificate was not the fix
+
+The failing eSCL request reached the printer and received an HTTP application response. It was not a
+TLS certificate negotiation failure. The native Dell protocol used by this workaround is also a raw
+TCP stream rather than HTTPS, so installing or generating a certificate would not repair either
+failure mode.
+
+## Reproducibility hashes
+
+These hashes identify the locally analyzed Dell files but the files are not redistributed:
+
+```text
+SWLLD.dylib (universal)   08ef3e86caac303b238f68ce615bd08d64b1549c13cdcc4ec20ae231dba6291d
+ICA executable (universal) 16cd8e206dd6548382c286d230a88643d430482c6157df2636ea542108108ff1
+SWLLD arm64 slice         12b234d0556b59bb6ecce200bb85cfa8875d620e1ffa2150415bffd7ae59e0a0
+ICA arm64 slice           9fa77d320b47523aa3e0b1ca05f047c3aa4e7eecfbb19508a2548e1eb1684160
+```
+
+Dell publishes SHA-256 `0191fdee9c4caddc90cb46c2c17b7d96727689686e019ff114edea807b9615a6`
+for its A05 macOS installer on the linked official driver page.
+
+## Included diagnostic source
+
+- `dell_swlld_probe.c` exercises discovery, initialization, readiness, ADF state, and cleanup without
+  starting a scan.
+- `dell_network_transport_probe.c` compares a plain socket, Dell's `tcp_connect`, and
+  `CNetDevice::OpenEx`. It is research code, not required by the installer, and may wedge port 23010.
+
+Compiled probes, driver files, decompiler output, and scanned fixtures are excluded deliberately.
+
+## Original development-session telemetry
+
+The original reporter supplied this agent-session telemetry. It describes the debugging interface,
+not printer throughput or the installed CLI:
+
+```text
+Worked for 8m 27s
+WebSocket: 34 events sent (123ms)
+WebSocket: 7,793 events received (391.9s)
+Responses API overhead: 17.4s
+Responses API inference: 49.9s
+TTFT: 25.1s (iapi), 32.5s (service)
+```
