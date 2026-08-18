@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "dell_image_quality.h"
 #include "dell_row_wrap.h"
 
 enum {
@@ -136,15 +137,24 @@ static bool write_pgm(const char *prefix, uint32_t page_number, const uint8_t *p
   if (row_offset > 0) {
     printf("row_wrap_offset=%zu\n", row_offset);
   }
+  size_t suspicious_columns = 0;
+  if (dell_e525w_has_vertical_streaks(page, row_bytes, visible_width, visible_height,
+                                      row_offset, &suspicious_columns)) {
+    fprintf(stderr,
+            "quality_warning=vertical_streaks page=%" PRIu32
+            " suspicious_columns=%zu action=rescan_this_side\n",
+            page_number, suspicious_columns);
+  }
   printf("output=%s\n", path);
   return true;
 }
 
 static bool read_one_page(const struct swlld_api *api, uint8_t *page, size_t page_size,
-                          uint16_t row_bytes) {
+                          uint16_t row_bytes, size_t *bytes_transferred) {
   size_t total = 0;
   size_t last_reported_rows = 0;
   uint8_t unused = 0;
+  *bytes_transferred = 0;
 
   while (total < page_size) {
     size_t remaining = page_size - total;
@@ -169,6 +179,7 @@ static bool read_one_page(const struct swlld_api *api, uint8_t *page, size_t pag
     }
 
     total += bytes_read;
+    *bytes_transferred = total;
     size_t rows = total / row_bytes;
     if (rows >= last_reported_rows + 320 || total == page_size) {
       fprintf(stderr, "scan_progress=%zu/%zu_rows\n", rows, page_size / row_bytes);
@@ -328,7 +339,14 @@ int main(int argc, char **argv) {
     }
     scan_active = true;
 
-    if (!read_one_page(&api, page, page_size, parameter.pixel_num)) {
+    size_t bytes_transferred = 0;
+    if (!read_one_page(&api, page, page_size, parameter.pixel_num, &bytes_transferred)) {
+      if (bytes_transferred > 0) {
+        fprintf(stderr,
+                "incomplete_side_discarded=%" PRIu32 " bytes=%zu/%zu "
+                "action=keep_completed_sides_and_use_a_new_output_for_remaining_sheets\n",
+                page_number, bytes_transferred, page_size);
+      }
       if (page_number == 1) {
         result = 18;
       } else {

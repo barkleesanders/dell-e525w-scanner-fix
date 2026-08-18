@@ -30,7 +30,7 @@ Installer options:
       --usb             Install, then scan over a directly connected USB cable
 
 The scan options --ip, --max-sides, --pages, --output, --driver, --keep-pgm,
-and --keep-blank-backs are passed to dell-scan. With no --wifi or --usb option,
+--drop-blank-backs, and --keep-blank-backs are passed to dell-scan. With no --wifi or --usb option,
 this script only installs.
 EOF
 }
@@ -70,7 +70,7 @@ while (( $# > 0 )); do
       scan_arguments+=("$1" "$2")
       shift 2
       ;;
-    --keep-pgm|--keep-blank-backs)
+    --keep-pgm|--drop-blank-backs|--keep-blank-backs)
       scan_arguments+=("$1")
       shift
       ;;
@@ -111,6 +111,7 @@ fetch_file() {
 }
 
 fetch_file 'src/dell_scan_engine.c' "$staging_dir/dell_scan_engine.c"
+fetch_file 'src/dell_image_quality.h' "$staging_dir/dell_image_quality.h"
 fetch_file 'src/dell_row_wrap.h' "$staging_dir/dell_row_wrap.h"
 fetch_file 'src/dell_wifi_bridge.c' "$staging_dir/dell_wifi_bridge.c"
 fetch_file 'src/pgm_to_pdf.c' "$staging_dir/pgm_to_pdf.c"

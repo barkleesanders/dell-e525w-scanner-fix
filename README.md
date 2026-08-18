@@ -63,8 +63,8 @@ dell-scan --usb
 # Drain the currently loaded USB batch into a chosen output file
 dell-scan --usb --output ~/Documents/Scans/batch.pdf
 
-# Keep reverse-side images, including blank backs
-dell-scan --usb --keep-blank-backs
+# Remove only conservatively detected blank reverse sides (explicit opt-in)
+dell-scan --usb --drop-blank-backs
 ```
 
 USB is the default if neither `--usb` nor `--wifi` is supplied. Output defaults to a timestamped PDF
@@ -89,7 +89,7 @@ running it if you do not want to pipe a network response directly to `bash`.
 
 ## How the fix works
 
-The failure had five separate layers:
+The failure had six separate layers:
 
 1. The printer advertised eSCL/AirScan and reported an idle, loaded ADF, but every ScanJobs request
    failed with HTTP 503. A certificate could not fix this because TLS was not the failing layer.
@@ -101,8 +101,12 @@ The failure had five separate layers:
    network denial encountered by the custom helper process.
 4. Dell's A05 300-DPI front-side stream rotated rows on a reproducible four-sheet cycle. The engine
    now restores the row order directly, without resizing, interpolation, cropping, or pixel loss.
-5. The driver can return a blank reverse-side image for a one-sided sheet. The PDF converter drops
-   only near-blank even sides by default; `--keep-blank-backs` preserves them.
+5. The driver returns ordered front/back frames, including blank backs. Every frame is preserved by
+   default because sparse real content can look nearly blank. `--drop-blank-backs` is a conservative,
+   explicit opt-in; the older `--keep-blank-backs` flag remains as a compatibility no-op.
+6. A rare driver failure can stretch page content into long vertical streaks while still producing
+   a structurally valid image. The engine now reports `quality_warning=vertical_streaks` without
+   deleting anything, so that physical side can be rescanned.
 
 The Wi-Fi service once stopped answering while printing, IPP, ping, and SNMP remained healthy. A
 printer power cycle restored TCP 23010; the first post-restart attempt scanned a complete page over
@@ -116,23 +120,38 @@ diagnostic source files under `research/`.
 
 ### `ADF is not ready`
 
-Reseat the page in the top feeder until the printer detects it. Clear any physical jam before retrying.
+Reseat the page in the top feeder until the printer detects it. Clear any physical jam, close the ADF,
+and leave the cable connected. The CLI polls the recovering USB service for about 25 seconds before
+failing. A `ReadScan` stop at 0 bytes does not consume a side and is safe to retry.
 
 ### Printer says `Computer(USB) Sending...`
 
 This can be an orphaned native scan job caused by ending a session while sheets remain in the ADF.
 Physically power the printer off and back on, wait for its normal ready screen, keep USB connected,
-and rerun `dell-scan --usb`. The CLI retries the post-restart USB service for up to three attempts.
+and rerun `dell-scan --usb`. The CLI retries the post-restart USB service for up to six attempts.
 In the recovery test, a web restart and a direct abort did not clear this state; a physical power
 cycle did.
 
 ### Batch size and page ceiling
 
-The live recovery run drained a 29-sheet load (58 raw front/back sides) cleanly. No smaller stack
-size proved less likely to jam; the repeatable failure was stopping the native session early, not
-the number of sheets. For easier checkpointing, batches of about 20 sheets are a practical choice,
-but 29 sheets is the largest load verified in one clean session. Leave the default 100-side ceiling
-unless you know the loaded batch will produce fewer raw sides.
+Across a 57-batch live records scan, loads around 20 sheets were generally stable and easy to
+checkpoint. One 29-sheet load (58 raw front/back frames) also drained cleanly. The observed jam did
+not establish a smaller hard limit, so 20 sheets is the practical recommendation rather than a
+claimed mechanical maximum. Leave the default 100-side ceiling unless you know the loaded batch
+will produce fewer raw sides.
+
+### A jam or partial side occurs mid-batch
+
+Clear the jam and close the ADF. If complete frames were already captured, the CLI saves only those
+complete frames; it never invents a partner page or writes a truncated frame. Put the remaining
+sheets in the feeder and use a new output filename. If the panel remains stuck on
+`Computer(USB) Sending...`, physically power-cycle the printer before retrying.
+
+### `quality_warning=vertical_streaks`
+
+The PDF is structurally valid, but the named raw side probably contains vertically stretched image
+data. Keep the saved batch, locate the printed side using the reported raw-side number, and rescan
+that side into a new output. OCR cannot repair the lost geometry.
 
 ### Wi-Fi times out or reports `connected=0`
 
@@ -167,7 +186,8 @@ data leaves your LAN or Mac.
 - Bounds page count and image allocations
 - Drains the current feeder load by default instead of cancelling after one side
 - Corrects the observed row-wrap cycle without altering pixel values
-- Drops only conservatively detected blank reverse sides unless asked to keep them
+- Preserves every captured side by default; blank-back removal is explicit and conservative
+- Warns about severe vertical-streak corruption without deleting the original capture
 - Cleans up only its task-specific temporary directory and child relay processes
 - Scans in 300-DPI, 8-bit grayscale from the ADF
 

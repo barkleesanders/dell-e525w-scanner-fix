@@ -15,6 +15,9 @@ enum {
   TOKEN_CAPACITY = 64,
   BLANK_PIXEL_THRESHOLD = 245,
   BLANK_INK_PER_THOUSAND = 6,
+  TEXT_STROKE_PIXEL_THRESHOLD = 180,
+  TEXT_STROKE_MINIMUM_RUN = 4,
+  TEXT_STROKE_MINIMUM_ROWS = 2,
 };
 
 struct pgm_image {
@@ -191,6 +194,26 @@ static bool is_near_blank_back(const struct pgm_image *image, size_t raw_side_nu
   size_t dark_pixels = 0;
   for (size_t index = 0; index < image->length; ++index) {
     if (image->pixels[index] < BLANK_PIXEL_THRESHOLD && ++dark_pixels > dark_limit) {
+      return false;
+    }
+  }
+
+  size_t rows_with_strokes = 0;
+  for (size_t row = 0; row < image->height; ++row) {
+    size_t run = 0;
+    for (size_t column = 0; column < image->width; ++column) {
+      uint8_t pixel = image->pixels[row * image->width + column];
+      if (pixel < TEXT_STROKE_PIXEL_THRESHOLD) {
+        ++run;
+        if (run >= TEXT_STROKE_MINIMUM_RUN) {
+          ++rows_with_strokes;
+          break;
+        }
+      } else {
+        run = 0;
+      }
+    }
+    if (rows_with_strokes >= TEXT_STROKE_MINIMUM_ROWS) {
       return false;
     }
   }

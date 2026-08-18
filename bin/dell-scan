@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-readonly dell_scan_version='1.1.1'
+readonly dell_scan_version='1.2.0'
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly script_dir
 readonly default_driver='/Library/Image Capture/Devices/Dell E525w Scanner (ICA).app/Contents/Resources/SWLLD.dylib'
@@ -15,10 +15,11 @@ dell_library="${DELL_SCAN_DRIVER:-$default_driver}"
 page_limit=100
 output_pdf=''
 keep_pgm=0
-keep_blank_backs=0
+drop_blank_backs=0
 transport='usb'
 wifi_ip="${DELL_SCAN_IP:-}"
-retry_delay="${DELL_SCAN_RETRY_DELAY:-6}"
+retry_delay="${DELL_SCAN_RETRY_DELAY:-5}"
+retry_attempts="${DELL_SCAN_RETRY_ATTEMPTS:-6}"
 scan_temp_dir=''
 wifi_bridge_pid=''
 wifi_nc_pid=''
@@ -27,7 +28,7 @@ usage() {
   cat <<'EOF'
 Usage: dell-scan [--usb | --wifi [--ip ADDRESS]] [--max-sides SIDES]
                  [-o OUTPUT.pdf] [--driver SWLLD.dylib] [--keep-pgm]
-                 [--keep-blank-backs]
+                 [--drop-blank-backs]
 
 Scan US Letter pages from a Dell Color MFP E525w ADF through Dell's native
 scanner protocol. The result is a grayscale PDF. USB is the default transport.
@@ -41,7 +42,8 @@ Options:
   -o, --output PATH     PDF path (default: ~/Documents/Scans/<timestamp>.pdf)
       --driver PATH     Path to Dell's installed SWLLD.dylib
       --keep-pgm        Preserve lossless per-page PGM files beside the PDF
-      --keep-blank-backs Keep near-blank reverse sides in the PDF
+      --drop-blank-backs Remove conservatively detected blank reverse sides
+      --keep-blank-backs Compatibility no-op; all raw sides are kept by default
       --version         Show the version
   -h, --help            Show this help
 
@@ -150,8 +152,11 @@ while (( $# > 0 )); do
       keep_pgm=1
       shift
       ;;
+    --drop-blank-backs)
+      drop_blank_backs=1
+      shift
+      ;;
     --keep-blank-backs)
-      keep_blank_backs=1
       shift
       ;;
     --usb)
@@ -185,6 +190,9 @@ done
 [[ "$page_limit" =~ ^[0-9]+$ ]] || fail 'raw-side ceiling must be an integer from 1 to 100'
 (( page_limit >= 1 && page_limit <= 100 )) || fail 'raw-side ceiling must be from 1 to 100'
 [[ "$retry_delay" =~ ^[0-9]+$ ]] || fail 'USB retry delay must be a nonnegative integer'
+[[ "$retry_attempts" =~ ^[0-9]+$ ]] || fail 'USB retry attempts must be an integer'
+(( retry_attempts >= 1 && retry_attempts <= 120 )) ||
+  fail 'USB retry attempts must be from 1 to 120'
 
 if [[ "$transport" == 'wifi' ]]; then
   if [[ -z "$wifi_ip" ]]; then
@@ -241,7 +249,7 @@ fi
 
 scan_engine_status=1
 scan_attempt=1
-while (( scan_attempt <= 3 )); do
+while (( scan_attempt <= retry_attempts )); do
   if [[ "$transport" == 'usb' ]]; then
     scan_target="$(usb_location_id || true)"
     if [[ "$scan_target" =~ ^[0-9]+$ ]]; then
@@ -260,9 +268,9 @@ while (( scan_attempt <= 3 )); do
     -print -quit)"
   [[ -z "$partial_page" ]] || break
   if [[ "$transport" == 'usb' && "$scan_engine_status" -ge 10 && \
-    "$scan_engine_status" -le 13 && "$scan_attempt" -lt 3 ]]; then
-    printf 'USB scanner service is not ready; retrying in %s seconds (%d/3)...\n' \
-      "$retry_delay" "$scan_attempt" >&2
+    "$scan_engine_status" -le 13 && "$scan_attempt" -lt retry_attempts ]]; then
+    printf 'USB scanner service is not ready; retrying in %s seconds (%d/%d)...\n' \
+      "$retry_delay" "$scan_attempt" "$retry_attempts" >&2
     sleep "$retry_delay"
     scan_attempt=$((scan_attempt + 1))
     continue
@@ -288,10 +296,10 @@ page_files=("$page_prefix"-page-*.pgm)
 shopt -u nullglob
 (( ${#page_files[@]} > 0 )) || fail 'scanner returned no pages'
 
-if (( keep_blank_backs )); then
-  "$pdf_binary" "$output_pdf" "${page_files[@]}"
-else
+if (( drop_blank_backs )); then
   "$pdf_binary" --drop-blank-backs "$output_pdf" "${page_files[@]}"
+else
+  "$pdf_binary" "$output_pdf" "${page_files[@]}"
 fi
 [[ -s "$output_pdf" ]] || fail 'PDF conversion produced an empty file'
 

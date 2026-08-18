@@ -44,6 +44,10 @@ clang "${compile_flags[@]}" "$repo_root/tests/row_wrap_test.c" \
   -o "$check_root/row-wrap-test"
 "$check_root/row-wrap-test"
 
+clang "${compile_flags[@]}" "$repo_root/tests/image_quality_test.c" \
+  -o "$check_root/image-quality-test"
+"$check_root/image-quality-test"
+
 shell_scripts=(bin/dell-scan install.sh scripts/check.sh tests/test.sh)
 for relative_script in "${shell_scripts[@]}"; do
   bash -n "$repo_root/$relative_script"
