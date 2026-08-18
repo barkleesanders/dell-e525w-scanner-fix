@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-readonly dell_scan_version='1.0.0'
+readonly dell_scan_version='1.1.0'
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly script_dir
 readonly default_driver='/Library/Image Capture/Devices/Dell E525w Scanner (ICA).app/Contents/Resources/SWLLD.dylib'
@@ -12,19 +12,22 @@ scanner_binary="$libexec_dir/dell-scan-engine"
 wifi_bridge_binary="$libexec_dir/dell-wifi-bridge"
 pdf_binary="$libexec_dir/pgm-to-pdf"
 dell_library="${DELL_SCAN_DRIVER:-$default_driver}"
-page_limit=1
+page_limit=100
 output_pdf=''
 keep_pgm=0
+keep_blank_backs=0
 transport='usb'
 wifi_ip="${DELL_SCAN_IP:-}"
+retry_delay="${DELL_SCAN_RETRY_DELAY:-6}"
 scan_temp_dir=''
 wifi_bridge_pid=''
 wifi_nc_pid=''
 
 usage() {
   cat <<'EOF'
-Usage: dell-scan [--usb | --wifi [--ip ADDRESS]] [-p PAGES] [-o OUTPUT.pdf]
-                 [--driver SWLLD.dylib] [--keep-pgm]
+Usage: dell-scan [--usb | --wifi [--ip ADDRESS]] [--max-sides SIDES]
+                 [-o OUTPUT.pdf] [--driver SWLLD.dylib] [--keep-pgm]
+                 [--keep-blank-backs]
 
 Scan US Letter pages from a Dell Color MFP E525w ADF through Dell's native
 scanner protocol. The result is a grayscale PDF. USB is the default transport.
@@ -33,15 +36,21 @@ Options:
       --usb             Use direct USB (default; connect the printer by cable)
       --wifi            Use Dell's native Wi-Fi scanner service on TCP 23010
       --ip ADDRESS      Printer IPv4 address; otherwise discover it with mDNS
-  -p, --pages PAGES     Maximum pages to scan (1-100; default: 1)
+      --max-sides N     Safety ceiling for raw sides (1-100; default: 100)
+  -p, --pages N         Backward-compatible alias for --max-sides
   -o, --output PATH     PDF path (default: ~/Documents/Scans/<timestamp>.pdf)
       --driver PATH     Path to Dell's installed SWLLD.dylib
       --keep-pgm        Preserve lossless per-page PGM files beside the PDF
+      --keep-blank-backs Keep near-blank reverse sides in the PDF
       --version         Show the version
   -h, --help            Show this help
 
 If Wi-Fi scanning is stuck, power-cycle the printer. For an immediate bypass,
 connect a USB cable directly to the Mac and run: dell-scan --usb
+
+The default safety ceiling intentionally drains a loaded feeder. Do not set it
+below the raw sides in the ADF: stopping Dell's driver mid-stack can strand a
+"Computer(USB) Sending" job until the printer is power-cycled.
 EOF
 }
 
@@ -98,6 +107,11 @@ discover_wifi_ip() {
   return 1
 }
 
+usb_location_id() {
+  ioreg -p IOUSB -l -w0 -r -n 'Color MFP E525w' 2>/dev/null |
+    awk -F'= ' '/"locationID"/ { print $2; exit }'
+}
+
 cleanup() {
   if [[ -n "$wifi_bridge_pid" ]]; then
     kill "$wifi_bridge_pid" 2>/dev/null || true
@@ -117,7 +131,7 @@ trap cleanup EXIT HUP INT TERM
 
 while (( $# > 0 )); do
   case "$1" in
-    -p|--pages)
+    -p|--pages|--max-sides)
       (( $# >= 2 )) || fail "$1 requires a value"
       page_limit="$2"
       shift 2
@@ -134,6 +148,10 @@ while (( $# > 0 )); do
       ;;
     --keep-pgm)
       keep_pgm=1
+      shift
+      ;;
+    --keep-blank-backs)
+      keep_blank_backs=1
       shift
       ;;
     --usb)
@@ -164,8 +182,9 @@ while (( $# > 0 )); do
   esac
 done
 
-[[ "$page_limit" =~ ^[0-9]+$ ]] || fail 'page count must be an integer from 1 to 100'
-(( page_limit >= 1 && page_limit <= 100 )) || fail 'page count must be from 1 to 100'
+[[ "$page_limit" =~ ^[0-9]+$ ]] || fail 'raw-side ceiling must be an integer from 1 to 100'
+(( page_limit >= 1 && page_limit <= 100 )) || fail 'raw-side ceiling must be from 1 to 100'
+[[ "$retry_delay" =~ ^[0-9]+$ ]] || fail 'USB retry delay must be a nonnegative integer'
 
 if [[ "$transport" == 'wifi' ]]; then
   if [[ -z "$wifi_ip" ]]; then
@@ -197,11 +216,6 @@ mkdir -p "$output_dir"
 
 if [[ "$transport" == 'usb' ]]; then
   command -v ioreg >/dev/null || fail 'ioreg is unavailable'
-  scan_target="$(ioreg -p IOUSB -l -w0 -r -n 'Color MFP E525w' |
-    awk -F'= ' '/"locationID"/ { print $2; exit }')"
-  if [[ ! "$scan_target" =~ ^[0-9]+$ ]]; then
-    fail 'Dell E525w is not visible over USB; connect it directly, turn it on, and retry'
-  fi
 fi
 
 scan_temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/dell-e525w-scan.XXXXXX")"
@@ -225,8 +239,38 @@ if [[ "$transport" == 'wifi' ]]; then
   scan_target='127.0.0.1'
 fi
 
-if ! "$scanner_binary" "$dell_library" "$transport" "$scan_target" "$page_prefix" \
-  "$page_limit"; then
+scan_engine_status=1
+scan_attempt=1
+while (( scan_attempt <= 3 )); do
+  if [[ "$transport" == 'usb' ]]; then
+    scan_target="$(usb_location_id || true)"
+    if [[ "$scan_target" =~ ^[0-9]+$ ]]; then
+      "$scanner_binary" "$dell_library" "$transport" "$scan_target" "$page_prefix" \
+        "$page_limit" && scan_engine_status=0 || scan_engine_status=$?
+    else
+      scan_engine_status=10
+    fi
+  else
+    "$scanner_binary" "$dell_library" "$transport" "$scan_target" "$page_prefix" \
+      "$page_limit" && scan_engine_status=0 || scan_engine_status=$?
+  fi
+
+  (( scan_engine_status == 0 )) && break
+  partial_page="$(find "$scan_temp_dir" -maxdepth 1 -type f -name 'scan-page-*.pgm' \
+    -print -quit)"
+  [[ -z "$partial_page" ]] || break
+  if [[ "$transport" == 'usb' && "$scan_engine_status" -ge 10 && \
+    "$scan_engine_status" -le 13 && "$scan_attempt" -lt 3 ]]; then
+    printf 'USB scanner service is not ready; retrying in %s seconds (%d/3)...\n' \
+      "$retry_delay" "$scan_attempt" >&2
+    sleep "$retry_delay"
+    scan_attempt=$((scan_attempt + 1))
+    continue
+  fi
+  break
+done
+
+if (( scan_engine_status != 0 )); then
   if [[ -f "$scan_temp_dir/bridge.log" ]]; then
     cat "$scan_temp_dir/bridge.log" >&2
   fi
@@ -244,7 +288,11 @@ page_files=("$page_prefix"-page-*.pgm)
 shopt -u nullglob
 (( ${#page_files[@]} > 0 )) || fail 'scanner returned no pages'
 
-"$pdf_binary" "$output_pdf" "${page_files[@]}"
+pdf_arguments=()
+if (( ! keep_blank_backs )); then
+  pdf_arguments+=(--drop-blank-backs)
+fi
+"$pdf_binary" "${pdf_arguments[@]}" "$output_pdf" "${page_files[@]}"
 [[ -s "$output_pdf" ]] || fail 'PDF conversion produced an empty file'
 
 if (( keep_pgm )); then
@@ -254,4 +302,4 @@ if (( keep_pgm )); then
 fi
 
 printf 'PDF: %s\n' "$output_pdf"
-printf 'Pages: %s\n' "${#page_files[@]}"
+printf 'Raw sides captured: %s\n' "${#page_files[@]}"

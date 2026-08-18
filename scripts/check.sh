@@ -40,6 +40,10 @@ analyzer_output="$(clang --analyze -std=c17 -Wall -Wextra -Wpedantic -Werror \
   exit 1
 }
 
+clang "${compile_flags[@]}" "$repo_root/tests/row_wrap_test.c" \
+  -o "$check_root/row-wrap-test"
+"$check_root/row-wrap-test"
+
 shell_scripts=(bin/dell-scan install.sh scripts/check.sh tests/test.sh)
 for relative_script in "${shell_scripts[@]}"; do
   bash -n "$repo_root/$relative_script"

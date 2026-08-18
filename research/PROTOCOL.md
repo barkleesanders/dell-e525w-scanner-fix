@@ -13,12 +13,33 @@ decompiled Dell code.
 - Driver geometry: 2560 by 3328 bytes/rows
 - Visible output: 2550 by 3300 pixels
 - Bytes transferred per page: 8,519,680
+- Observed front-side row correction cycle: 0, 2048, 512, 1536 pixels, repeating
 - Native network service: TCP 23010
 - Broken compatibility path: eSCL `POST /eSCL/ScanJobs` returned HTTP 503
 - Working paths: Dell native USB; Dell native Wi-Fi after restarting its stuck printer service
 
 The proof PDFs and source pages contained private information and are intentionally not distributed.
 Their structure, page dimensions, and readability were validated locally before publication.
+
+## Long USB batch findings
+
+A sanitized archive run captured 370 raw side images across 18 sessions. The driver returned 186
+document fronts and 184 blank backs. Every even raw side was blank or near-blank, and every odd side
+contained document data; the converter's conservative blank-back threshold separated the two sets
+in that run. The largest clean session contained 29 physical sheets (58 raw sides).
+
+The observed fault did not correlate with a high sheet count. A one-side ceiling while additional
+sheets remained caused Dell's cleanup path to wait indefinitely and left the printer displaying
+`Computer(USB) Sending...`. Allowing the native session to reach feeder-empty completed cleanup
+normally. A physical power cycle cleared the orphaned printer-side job; a web restart and a direct
+abort did not. Immediately after power-on, USB enumeration can precede scanner-service readiness,
+so the public CLI retries safe pre-scan failures at six-second intervals.
+
+The same run exposed a reproducible horizontal row rotation on front-side images. By raw side number
+modulo 8, the lossless correction offsets were 0, 2048, 512, and 1536 pixels. Applying the offsets as
+circular byte reordering restored continuous page rows without scaling, interpolation, or cropping.
+Back-side geometry with actual printed content was not validated, so the engine leaves those rows
+unchanged rather than guessing.
 
 ## Driver interface used by the original source
 

@@ -13,6 +13,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "dell_row_wrap.h"
+
 enum {
   COLOR_MODE_GRAYSCALE = 2,
   SCAN_METHOD_ADF = 1,
@@ -112,10 +114,15 @@ static bool write_pgm(const char *prefix, uint32_t page_number, const uint8_t *p
     return false;
   }
 
+  size_t row_offset = dell_e525w_front_row_offset(page_number, visible_width);
   bool ok = fprintf(output, "P5\n%u %u\n255\n", visible_width, visible_height) > 0;
   for (uint16_t row = 0; ok && row < visible_height; ++row) {
     const uint8_t *row_start = page + (size_t)row * row_bytes;
-    ok = fwrite(row_start, 1, visible_width, output) == visible_width;
+    size_t tail_length = (size_t)visible_width - row_offset;
+    ok = fwrite(row_start + row_offset, 1, tail_length, output) == tail_length;
+    if (ok && row_offset > 0) {
+      ok = fwrite(row_start, 1, row_offset, output) == row_offset;
+    }
   }
   if (fclose(output) != 0) {
     ok = false;
@@ -126,6 +133,9 @@ static bool write_pgm(const char *prefix, uint32_t page_number, const uint8_t *p
     return false;
   }
 
+  if (row_offset > 0) {
+    printf("row_wrap_offset=%zu\n", row_offset);
+  }
   printf("output=%s\n", path);
   return true;
 }
