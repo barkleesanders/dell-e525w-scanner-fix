@@ -77,7 +77,7 @@ and the `CScannerCmd` request/response hierarchy). The 13 above are all C ABI, s
 surface this project does **not** touch is exactly six names:
 
 ```text
-CheckScannerReady        pre-flight readiness; would turn a mid-scan failure into a clean refusal
+CheckScannerReady        NOW USED as a failure-path diagnostic -- see the recovery below
 FindScannerByLocation    non-pull variant of the USB discovery already in use
 FindScannerEx_Scopeid    IPv6 scoped variant of the Wi-Fi discovery already in use
 FindSnmpAgent            SNMP-based network discovery -- see the dead end below
@@ -95,9 +95,33 @@ repeat the work:
   when `--ip` is omitted, and that path resolves `_pdl-datastream._tcp` in about three seconds
   against the live device.
 
-`CheckScannerReady` is the one C-ABI name still worth pursuing. It is `extern "C"`, so there is
-no mangled signature to decode from, and calling it would require inferring the argument shape
-from disassembly plus a real jammed or warming scanner to exercise the failure path.
+`CheckScannerReady` is now resolved and wired in as a diagnostic. An earlier revision of this
+section claimed its signature could not be recovered because `extern "C"` leaves no mangling to
+decode. That was wrong, and the correction is worth keeping because the same shortcut recovers
+any of these:
+
+**The C wrapper carries no types, but the class method it forwards to does.**
+`_ZN8CScanner17CheckScannerReadyEPh` demangles to `CScanner::CheckScannerReady(unsigned char*)`.
+Disassembly confirms the wrapper is a four-instruction thunk:
+
+```asm
+_CheckScannerReady:
+  mov x1, x0        ; caller's argument becomes argument 1
+  adr x0, #50184    ; g_Scanner becomes argument 0, the `this` pointer
+  nop
+  b   __ZN8CScanner17CheckScannerReadyEPh    ; tail call
+```
+
+`GetScannerStatus`, which this project already calls, is the identical thunk against
+`CScanner::GetScannerStatus(unsigned char*)`; both `adr` immediates resolve to the same
+`g_Scanner` address. So all 19 C-ABI exports can be typed from their mangled counterparts, and
+no signature here needs to be guessed.
+
+What is still unknown is **semantics, not syntax**: Dell documents neither the value space of the
+readiness byte nor of the status byte. The engine therefore reports both raw and interprets
+neither, and calls `CheckScannerReady` only on a read path that has already failed, so a working
+scan is never affected. Mapping those bytes to real conditions needs a jammed, warming, or
+lidless scanner and remains open.
 
 Among the mangled C++ symbols, three are worth naming because they bear on open questions here:
 

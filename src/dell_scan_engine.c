@@ -59,6 +59,13 @@ struct swlld_api {
   no_arg_fn initialize_scanner;
   byte_out_fn get_adf_mode;
   byte_out_fn get_scanner_status;
+  /*
+   * Optional, and the only member that may be NULL. Every other entry is
+   * resolved with required_symbol and aborts startup when missing; this one is
+   * a diagnostic, so a driver build without it must still scan. Check before
+   * calling.
+   */
+  byte_out_fn check_scanner_ready;
   scan_parameter_fn set_scan_parameter;
   scan_parameter_fn get_scan_parameter;
   no_arg_fn start_scan;
@@ -191,6 +198,18 @@ static bool read_one_page(const struct swlld_api *api, uint8_t *page, size_t pag
       fprintf(stderr, "ReadScan stopped at %zu/%zu bytes (ok=%" PRIu64 ", read=%" PRIu32
                       ", status_ok=%" PRIu64 ", status=%u)\n",
               total, page_size, read_ok, bytes_read, status_ok, scanner_status);
+      /*
+       * Second, independent reading of why the transfer stopped. Only runs on a
+       * path that has already failed, so it cannot disturb a working scan, and
+       * only when the driver exports it. Neither byte's value space is
+       * documented by Dell -- both are reported raw rather than interpreted,
+       * because inventing an interpretation is how a diagnostic starts lying.
+       */
+      if (api->check_scanner_ready != NULL) {
+        uint8_t ready_state = 0xff;
+        uint64_t ready_ok = api->check_scanner_ready(&ready_state);
+        fprintf(stderr, "  CheckScannerReady(ok=%" PRIu64 ", state=%u)\n", ready_ok, ready_state);
+      }
       return false;
     }
 
@@ -261,6 +280,28 @@ int main(int argc, char **argv) {
   LOAD_SYMBOL(cancel_scan, "CancelScan");
   LOAD_SYMBOL(terminate_driver, "TerminateDriver");
 #undef LOAD_SYMBOL
+
+  /*
+   * Resolved directly rather than through LOAD_SYMBOL so a driver build that
+   * lacks it still scans -- required_symbol aborts, and refusing to run over a
+   * missing diagnostic would be a worse tool.
+   *
+   * The signature is not a guess. CheckScannerReady is exported extern "C", so
+   * its own name carries no types, but the class method it forwards to is
+   * mangled and does: _ZN8CScanner17CheckScannerReadyEPh demangles to
+   * CScanner::CheckScannerReady(unsigned char*). Disassembling the wrapper
+   * confirms the forwarding -- it is a four-instruction thunk that shifts the
+   * caller's argument to x1, loads g_Scanner into x0 as `this`, and tail-branches
+   * to the mangled method. GetScannerStatus, which this engine already calls,
+   * is the same thunk shape against CScanner::GetScannerStatus(unsigned char*),
+   * so byte_out_fn describes both.
+   */
+  {
+    void *ready_symbol = dlsym(library, "CheckScannerReady");
+    if (ready_symbol != NULL) {
+      memcpy(&api.check_scanner_ready, &ready_symbol, sizeof(ready_symbol));
+    }
+  }
 
   int result = 1;
   bool driver_active = false;
