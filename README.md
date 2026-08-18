@@ -60,12 +60,17 @@ dell-scan --wifi --ip 192.168.1.50
 # USB cable connected directly to the Mac
 dell-scan --usb
 
-# Up to ten ADF pages and a chosen output file
-dell-scan --wifi --pages 10 --output ~/Documents/Scans/batch.pdf
+# Drain the currently loaded USB batch into a chosen output file
+dell-scan --usb --output ~/Documents/Scans/batch.pdf
+
+# Keep reverse-side images, including blank backs
+dell-scan --usb --keep-blank-backs
 ```
 
 USB is the default if neither `--usb` nor `--wifi` is supplied. Output defaults to a timestamped PDF
-under `~/Documents/Scans`. Run `dell-scan --help` for every option.
+under `~/Documents/Scans`. The default 100-raw-side safety ceiling is intentionally higher than a
+normal feeder load so Dell's driver can reach feeder-empty naturally. `--pages` remains as a
+backward-compatible alias for `--max-sides`. Run `dell-scan --help` for every option.
 
 ## What the installer does
 
@@ -84,7 +89,7 @@ running it if you do not want to pipe a network response directly to `bash`.
 
 ## How the fix works
 
-The failure had three separate layers:
+The failure had five separate layers:
 
 1. The printer advertised eSCL/AirScan and reported an idle, loaded ADF, but every ScanJobs request
    failed with HTTP 503. A certificate could not fix this because TLS was not the failing layer.
@@ -94,6 +99,10 @@ The failure had three separate layers:
 3. Dell's Wi-Fi path uses `FindScannerEx` and a proprietary stream on TCP 23010, not eSCL. A tiny
    loopback bridge sends that unchanged stream through Apple's `/usr/bin/nc`, avoiding a macOS local
    network denial encountered by the custom helper process.
+4. Dell's A05 300-DPI front-side stream rotated rows on a reproducible four-sheet cycle. The engine
+   now restores the row order directly, without resizing, interpolation, cropping, or pixel loss.
+5. The driver can return a blank reverse-side image for a one-sided sheet. The PDF converter drops
+   only near-blank even sides by default; `--keep-blank-backs` preserves them.
 
 The Wi-Fi service once stopped answering while printing, IPP, ping, and SNMP remained healthy. A
 printer power cycle restored TCP 23010; the first post-restart attempt scanned a complete page over
@@ -108,6 +117,22 @@ diagnostic source files under `research/`.
 ### `ADF is not ready`
 
 Reseat the page in the top feeder until the printer detects it. Clear any physical jam before retrying.
+
+### Printer says `Computer(USB) Sending...`
+
+This can be an orphaned native scan job caused by ending a session while sheets remain in the ADF.
+Physically power the printer off and back on, wait for its normal ready screen, keep USB connected,
+and rerun `dell-scan --usb`. The CLI retries the post-restart USB service for up to three attempts.
+In the recovery test, a web restart and a direct abort did not clear this state; a physical power
+cycle did.
+
+### Batch size and page ceiling
+
+The live recovery run drained a 29-sheet load (58 raw front/back sides) cleanly. No smaller stack
+size proved less likely to jam; the repeatable failure was stopping the native session early, not
+the number of sheets. For easier checkpointing, batches of about 20 sheets are a practical choice,
+but 29 sheets is the largest load verified in one clean session. Leave the default 100-side ceiling
+unless you know the loaded batch will produce fewer raw sides.
 
 ### Wi-Fi times out or reports `connected=0`
 
@@ -140,6 +165,9 @@ data leaves your LAN or Mac.
 - No telemetry, accounts, cloud upload, or background service
 - Refuses to overwrite an existing PDF or preserved PGM directory
 - Bounds page count and image allocations
+- Drains the current feeder load by default instead of cancelling after one side
+- Corrects the observed row-wrap cycle without altering pixel values
+- Drops only conservatively detected blank reverse sides unless asked to keep them
 - Cleans up only its task-specific temporary directory and child relay processes
 - Scans in 300-DPI, 8-bit grayscale from the ADF
 

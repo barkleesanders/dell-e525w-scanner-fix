@@ -29,8 +29,9 @@ Installer options:
       --wifi            Install, then scan over Wi-Fi
       --usb             Install, then scan over a directly connected USB cable
 
-The scan options --ip, --pages, --output, --driver, and --keep-pgm are passed
-to dell-scan. With no --wifi or --usb option, this script only installs.
+The scan options --ip, --max-sides, --pages, --output, --driver, --keep-pgm,
+and --keep-blank-backs are passed to dell-scan. With no --wifi or --usb option,
+this script only installs.
 EOF
 }
 
@@ -59,7 +60,7 @@ while (( $# > 0 )); do
       scan_arguments+=("$1")
       shift
       ;;
-    --ip|--pages|-p|--output|-o|--driver)
+    --ip|--max-sides|--pages|-p|--output|-o|--driver)
       (( $# >= 2 )) || fail "$1 requires a value"
       if [[ "$1" == '--ip' ]]; then
         scan_mode='wifi'
@@ -69,7 +70,7 @@ while (( $# > 0 )); do
       scan_arguments+=("$1" "$2")
       shift 2
       ;;
-    --keep-pgm)
+    --keep-pgm|--keep-blank-backs)
       scan_arguments+=("$1")
       shift
       ;;
@@ -110,6 +111,7 @@ fetch_file() {
 }
 
 fetch_file 'src/dell_scan_engine.c' "$staging_dir/dell_scan_engine.c"
+fetch_file 'src/dell_row_wrap.h' "$staging_dir/dell_row_wrap.h"
 fetch_file 'src/dell_wifi_bridge.c' "$staging_dir/dell_wifi_bridge.c"
 fetch_file 'src/pgm_to_pdf.c' "$staging_dir/pgm_to_pdf.c"
 fetch_file 'bin/dell-scan' "$staging_dir/dell-scan"

@@ -13,6 +13,8 @@
 
 enum {
   TOKEN_CAPACITY = 64,
+  BLANK_PIXEL_THRESHOLD = 245,
+  BLANK_INK_PER_THOUSAND = 6,
 };
 
 struct pgm_image {
@@ -180,16 +182,40 @@ static CGRect fitted_rectangle(size_t pixel_width, size_t pixel_height, CGRect p
                     height);
 }
 
+static bool is_near_blank_back(const struct pgm_image *image, size_t raw_side_number) {
+  if (raw_side_number % 2 != 0) {
+    return false;
+  }
+
+  size_t dark_limit = image->length / 1000 * BLANK_INK_PER_THOUSAND;
+  size_t dark_pixels = 0;
+  for (size_t index = 0; index < image->length; ++index) {
+    if (image->pixels[index] < BLANK_PIXEL_THRESHOLD && ++dark_pixels > dark_limit) {
+      return false;
+    }
+  }
+  return true;
+}
+
 int main(int argc, char **argv) {
-  if (argc < 3) {
-    fprintf(stderr, "usage: %s <output.pdf> <page-001.pgm> [page-002.pgm ...]\n", argv[0]);
+  bool drop_blank_backs = false;
+  int output_index = 1;
+  if (output_index < argc && strcmp(argv[output_index], "--drop-blank-backs") == 0) {
+    drop_blank_backs = true;
+    ++output_index;
+  }
+  if (argc - output_index < 2) {
+    fprintf(stderr,
+            "usage: %s [--drop-blank-backs] <output.pdf> <page-001.pgm> "
+            "[page-002.pgm ...]\n",
+            argv[0]);
     return 2;
   }
 
   CFURLRef output_url = CFURLCreateFromFileSystemRepresentation(
-      NULL, (const UInt8 *)argv[1], (CFIndex)strlen(argv[1]), false);
+      NULL, (const UInt8 *)argv[output_index], (CFIndex)strlen(argv[output_index]), false);
   if (output_url == NULL) {
-    fprintf(stderr, "invalid output path: %s\n", argv[1]);
+    fprintf(stderr, "invalid output path: %s\n", argv[output_index]);
     return 2;
   }
 
@@ -197,16 +223,25 @@ int main(int argc, char **argv) {
   CGContextRef context = CGPDFContextCreateWithURL(output_url, &media_box, NULL);
   CFRelease(output_url);
   if (context == NULL) {
-    fprintf(stderr, "cannot create PDF: %s\n", argv[1]);
+    fprintf(stderr, "cannot create PDF: %s\n", argv[output_index]);
     return 3;
   }
 
   int result = 0;
-  for (int index = 2; index < argc; ++index) {
+  size_t pages_written = 0;
+  size_t blank_backs_dropped = 0;
+  int first_page_index = output_index + 1;
+  for (int index = first_page_index; index < argc; ++index) {
     struct pgm_image image = {0};
     if (!load_pgm(argv[index], &image)) {
       result = 4;
       break;
+    }
+    size_t raw_side_number = (size_t)(index - first_page_index + 1);
+    if (drop_blank_backs && is_near_blank_back(&image, raw_side_number)) {
+      ++blank_backs_dropped;
+      free(image.pixels);
+      continue;
     }
     CGImageRef cg_image = create_cg_image(&image);
     free(image.pixels);
@@ -222,12 +257,20 @@ int main(int argc, char **argv) {
     CGContextDrawImage(context, draw_rectangle, cg_image);
     CGPDFContextEndPage(context);
     CGImageRelease(cg_image);
+    ++pages_written;
   }
 
   CGPDFContextClose(context);
   CGContextRelease(context);
+  if (result == 0 && pages_written == 0) {
+    fprintf(stderr, "all captured sides were blank; no PDF pages were written\n");
+    result = 4;
+  }
   if (result != 0) {
-    (void)remove(argv[1]);
+    (void)remove(argv[output_index]);
+  } else {
+    printf("pdf_pages=%zu\n", pages_written);
+    printf("blank_backs_dropped=%zu\n", blank_backs_dropped);
   }
   return result;
 }
