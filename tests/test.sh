@@ -80,6 +80,15 @@ grep -F 'blank_backs_dropped=1' "$test_root/retry.out"
 grep -F 'Raw sides captured: 2' "$test_root/retry.out"
 [[ "$(<"$test_root/attempt-count")" == '2' ]]
 
+PATH="$mock_bin:$PATH" DELL_SCAN_DRIVER="$test_root/fake-driver.dylib" \
+  DELL_SCAN_RETRY_DELAY=0 DELL_TEST_ATTEMPT_FILE="$test_root/attempt-count" \
+  "$scanner" --usb --keep-blank-backs --output "$test_root/keep-blank-backs.pdf" \
+  >"$test_root/keep-blank-backs.out" 2>"$test_root/keep-blank-backs.err"
+grep -F 'pdf_pages=2' "$test_root/keep-blank-backs.out"
+grep -F 'blank_backs_dropped=0' "$test_root/keep-blank-backs.out"
+grep -F 'Raw sides captured: 2' "$test_root/keep-blank-backs.out"
+[[ "$(<"$test_root/attempt-count")" == '3' ]]
+
 if command -v qpdf >/dev/null; then
   qpdf --check "$test_root/fixture.pdf" >/dev/null
   [[ "$(qpdf --show-npages "$test_root/fixture.pdf")" == '1' ]]
@@ -87,6 +96,8 @@ if command -v qpdf >/dev/null; then
   [[ "$(qpdf --show-npages "$test_root/filtered.pdf")" == '2' ]]
   qpdf --check "$test_root/retry.pdf" >/dev/null
   [[ "$(qpdf --show-npages "$test_root/retry.pdf")" == '1' ]]
+  qpdf --check "$test_root/keep-blank-backs.pdf" >/dev/null
+  [[ "$(qpdf --show-npages "$test_root/keep-blank-backs.pdf")" == '2' ]]
 fi
 
 echo 'tests=passed'
