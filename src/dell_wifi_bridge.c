@@ -67,14 +67,21 @@ static int create_listener(void) {
   return listener;
 }
 
-static bool relay_session(int client, int *to_nc, int from_nc) {
+/*
+ * Relay until the scan engine closes its end, which is what ends a session.
+ * Byte counts are accumulated and reported once by the caller: logging every
+ * relayed chunk emitted ~130 lines per page (8,519,680 bytes / 64 KiB), so a
+ * 29-sheet batch produced over 7,000 lines that buried the real error when
+ * dell-scan cat's this log on failure.
+ */
+static bool relay_session(int client, int *to_nc, int from_nc, uint64_t *to_printer_bytes,
+                          uint64_t *from_printer_bytes) {
   uint8_t buffer[RELAY_BUFFER_SIZE];
-  bool client_open = true;
   bool nc_open = true;
 
-  while (client_open || nc_open) {
+  for (;;) {
     struct pollfd descriptors[2] = {
-        {.fd = client_open ? client : -1, .events = POLLIN},
+        {.fd = client, .events = POLLIN},
         {.fd = nc_open ? from_nc : -1, .events = POLLIN},
     };
     int ready = poll(descriptors, 2, -1);
@@ -85,34 +92,40 @@ static bool relay_session(int client, int *to_nc, int from_nc) {
       return false;
     }
 
-    if (client_open && (descriptors[0].revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
+    if ((descriptors[0].revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
       ssize_t count = read(client, buffer, sizeof(buffer));
       if (count > 0) {
-        fprintf(stderr, "bridge_client_to_printer=%zd\n", count);
+        *to_printer_bytes += (uint64_t)count;
         if (!write_all(*to_nc, buffer, (size_t)count)) {
           return false;
         }
-      } else if (count == 0 || errno != EINTR) {
+      } else if (count == 0) {
+        /* Clean EOF from the scan engine ends the session successfully. */
         close(*to_nc);
         *to_nc = -1;
         return true;
+      } else if (errno != EINTR) {
+        /* A read error is a failed relay, not a completed one. Conflating it
+         * with EOF reported a broken transfer to dell-scan as success. */
+        return false;
       }
     }
 
     if (nc_open && (descriptors[1].revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
       ssize_t count = read(from_nc, buffer, sizeof(buffer));
       if (count > 0) {
-        fprintf(stderr, "bridge_printer_to_client=%zd\n", count);
+        *from_printer_bytes += (uint64_t)count;
         if (!write_all(client, buffer, (size_t)count)) {
           return false;
         }
-      } else if (count == 0 || errno != EINTR) {
+      } else if (count == 0) {
         nc_open = false;
         shutdown(client, SHUT_WR);
+      } else if (errno != EINTR) {
+        return false;
       }
     }
   }
-  return true;
 }
 
 int main(int argc, char **argv) {
@@ -166,15 +179,24 @@ int main(int argc, char **argv) {
     return 5;
   }
 
-  bool relay_ok = relay_session(client, &to_nc, from_nc);
+  uint64_t to_printer_bytes = 0;
+  uint64_t from_printer_bytes = 0;
+  bool relay_ok = relay_session(client, &to_nc, from_nc, &to_printer_bytes, &from_printer_bytes);
+  int relay_errno = errno;
   if (to_nc >= 0) {
     close(to_nc);
   }
   close(from_nc);
   close(client);
 
+  fprintf(stderr, "bridge_to_printer_bytes=%llu bridge_from_printer_bytes=%llu\n",
+          (unsigned long long)to_printer_bytes, (unsigned long long)from_printer_bytes);
   if (!relay_ok) {
-    fprintf(stderr, "bridge relay failed: %s\n", strerror(errno));
+    /* Report the transferred totals alongside the failure: a relay that moved
+     * zero bytes from the printer is a different problem than one that stalled
+     * mid-page, and the previous per-chunk log made that impossible to see. */
+    fprintf(stderr, "bridge relay failed after %llu bytes from the printer: %s\n",
+            (unsigned long long)from_printer_bytes, strerror(relay_errno));
     return 6;
   }
   return 0;

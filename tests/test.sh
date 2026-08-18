@@ -146,6 +146,65 @@ if [[ -n "$unguarded_arrays" ]]; then
   exit 1
 fi
 
+# The Wi-Fi bridge previously had no runtime coverage at all -- check.sh only
+# compiled it. This exercises a real loopback session: bidirectional relay,
+# clean-EOF exit status, and the one-line byte summary that replaced ~130
+# per-chunk log lines per page.
+bridge="$test_root/prefix/libexec/dell-e525w-scanner-fix/dell-wifi-bridge"
+bridge_dir="$test_root/bridge"
+mkdir "$bridge_dir"
+mkfifo "$bridge_dir/to_printer" "$bridge_dir/from_printer"
+( cat "$bridge_dir/to_printer" >"$bridge_dir/captured" ) &
+bridge_capture_pid=$!
+( printf 'PRINTER-REPLY'; sleep 2 ) >"$bridge_dir/from_printer" &
+bridge_feed_pid=$!
+"$bridge" 127.0.0.1 "$bridge_dir/to_printer" "$bridge_dir/from_printer" \
+  >"$bridge_dir/out" 2>"$bridge_dir/err" &
+bridge_pid=$!
+sleep 1
+
+bridge_client_status=0
+python3 - "$bridge_dir/received" <<'PYEOF' || bridge_client_status=$?
+import socket, sys
+with socket.create_connection(("127.0.0.1", 23010), timeout=10) as s:
+    s.sendall(b"SCAN-REQUEST")
+    s.shutdown(socket.SHUT_WR)
+    chunks = []
+    while True:
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        chunks.append(chunk)
+open(sys.argv[1], "wb").write(b"".join(chunks))
+PYEOF
+
+wait "$bridge_pid"
+bridge_exit=$?
+kill "$bridge_capture_pid" "$bridge_feed_pid" 2>/dev/null || true
+wait "$bridge_capture_pid" "$bridge_feed_pid" 2>/dev/null || true
+
+(( bridge_client_status == 0 )) || {
+  echo "bridge client failed (status $bridge_client_status)" >&2
+  exit 1
+}
+(( bridge_exit == 0 )) || {
+  echo "bridge exited $bridge_exit on a clean session" >&2
+  cat "$bridge_dir/err" >&2
+  exit 1
+}
+[[ "$(<"$bridge_dir/captured")" == 'SCAN-REQUEST' ]] ||
+  { echo 'bridge did not relay client bytes to the printer side' >&2; exit 1; }
+[[ "$(<"$bridge_dir/received")" == 'PRINTER-REPLY' ]] ||
+  { echo 'bridge did not relay printer bytes back to the client' >&2; exit 1; }
+grep -qF 'bridge_to_printer_bytes=12 bridge_from_printer_bytes=13' "$bridge_dir/err" ||
+  { echo 'bridge byte summary missing or wrong' >&2; cat "$bridge_dir/err" >&2; exit 1; }
+bridge_err_lines="$(wc -l <"$bridge_dir/err" | tr -d ' ')"
+(( bridge_err_lines == 1 )) || {
+  echo "bridge logged $bridge_err_lines stderr lines; expected exactly 1 summary" >&2
+  echo 'per-chunk logging buries the real error when dell-scan cats this log' >&2
+  exit 1
+}
+
 if command -v qpdf >/dev/null; then
   qpdf --check "$test_root/fixture.pdf" >/dev/null
   [[ "$(qpdf --show-npages "$test_root/fixture.pdf")" == '1' ]]
