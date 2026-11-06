@@ -11,7 +11,9 @@ jobs:
   macos:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11ea6958c3c6dedea1f8ce28e730e378db5c63c0 # v4
+        with:
+          persist-credentials: false
       - name: Install test tools
         run: brew install shellcheck qpdf
       - name: Compile, analyze, and test
